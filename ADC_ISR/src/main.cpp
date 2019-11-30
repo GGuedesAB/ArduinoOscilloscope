@@ -95,7 +95,8 @@ void start_ad_conversion () {
 
 void capture_sampled_value () {
   // Disable interrupts to avoid nested interrupts
-  SREG ^= 0x80;
+  SREG &= ~0x80;
+  TCNT1 = 0;
   while (!conversion_complete) {
     SREG |= 0x80;
     TCNT1 = 0;
@@ -105,7 +106,6 @@ void capture_sampled_value () {
   sample &= 0x3FF;
   collect_data = true;
   num_of_measurements++;
-  TCNT1 = 0;
   // Enable interrupts
   SREG |= 0x80;
 }
