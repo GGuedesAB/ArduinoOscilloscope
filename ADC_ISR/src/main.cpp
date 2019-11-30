@@ -5,6 +5,8 @@ uint8_t next_channel = 0x41;
 uint16_t sample = 0;
 int num_of_measurements = 0;
 bool collect_data = false;
+bool buffer_ready = false;
+bool conversion_complete = false;
 
 class ADC_RESULT {
   uint16_t data [N];
@@ -70,42 +72,58 @@ void change_measure_channel() {
   // This result must be decoded to correctly write on the MUX
   /* ADC0 -> 0x40 * 
    * ADC1 -> 0x41 */
-  if (num_of_measurements < 800){
+  if (num_of_measurements < 2*N){
     ADMUX = ADMUX ^ 0x01;
   }
-  else if (num_of_measurements == 800) {
+  else if (num_of_measurements == 2*N) {
     ADMUX = 0x42;
   }
-  else if (num_of_measurements == 801) {
+  else if (num_of_measurements == 2*N+1) {
     ADMUX = 0x43;
   }
   else {
     num_of_measurements = 0;
+    buffer_ready = true;
     ADMUX = 0x40;
   }
 }
 
 void start_ad_conversion () {
-    ADCSRA |= (1<<ADSC);
+  conversion_complete = false;
+  ADCSRA |= (1<<ADSC);
 }
 
-ISR(TIMER1_COMPA_vect) {
+void capture_sampled_value () {
   // Disable interrupts to avoid nested interrupts
   SREG ^= 0x80;
-  ++num_of_measurements;
+  while (!conversion_complete) {
+    SREG |= 0x80;
+    TCNT1 = 0;
+  }
   sample = ADCL;
   sample += ADCH << 8;
   sample &= 0x3FF;
   collect_data = true;
+  num_of_measurements++;
   TCNT1 = 0;
   // Enable interrupts
-  SREG ^= 0x80;
+  SREG |= 0x80;
+}
+
+ISR(ADC_vect) {
+  conversion_complete = true;
+}
+
+ISR(TIMER1_COMPA_vect) {
+  capture_sampled_value();
 }
 
 void setup() {
   Serial.begin(115200);
   pinMode(A0, INPUT);
   pinMode(A1, INPUT);
+  pinMode(A2, INPUT);
+  pinMode(A3, INPUT);
   // Justify data to right and set ref to Vcc.
   
   ADMUX ^= ADMUX;
@@ -113,7 +131,7 @@ void setup() {
   
   // Configuring ADC Status Reg A
   // It must be enabled, not start a conversion yet
-  // 101001111 -> Interrupt enable, auto trigger, 128 division
+  // 101001111 -> Interrupt enable, auto trigger, 32 division -> 26us conversion time
   /* Free running mode creates the challange of defining correctly which input will be multiplexed, *
    * since it triggers it self with the last configuration.                                         *
    * That means it will capture twice the input it was configured in the setup method.              */
@@ -121,8 +139,9 @@ void setup() {
   ADCSRA ^= ADCSRA;
   ADCSRA |= (1<<ADEN);
   ADCSRA |= (1<<ADATE);
+  ADCSRA |= (1<<ADIE);
   ADCSRA |= (1<<ADPS2);
-  ADCSRA |= (1<<ADPS1);
+  //ADCSRA |= (1<<ADPS1);
   ADCSRA |= (1<<ADPS0);
   
   // ADCSRA should equal 0X2F
@@ -138,14 +157,14 @@ void setup() {
   
   ADCSRA |= (1<<ADSC);
   // Now I need to implement timing Compare value + count speed
-  // Count up to 2000 @ 16MHz -> 8kS/s
+  // Count up to 1000 @ 16MHz -> 16kS/s
   TCCR1A ^= TCCR1A;
   TCCR1B ^= TCCR1B;
   TCCR1B |= (1<<WGM12);
   TCCR1B |= (1<<CS10);
   TIMSK1 |= (1<<OCIE1A);
   TCNT1 = 0;
-  OCR1A = 2000;
+  OCR1A = 1000;
   OCR1B = 4000;
   SREG |= 0x80;
 }
@@ -153,8 +172,8 @@ void setup() {
 void loop() {
   static ADC_RESULT voltage_buff;
   static ADC_RESULT current_buff;
-  int temperature = 0;
-  int light = 0;
+  static int temperature = 0;
+  static int light = 0;
   if (collect_data) {
     SREG ^= 0x80;
     collect_data = false;
@@ -162,27 +181,28 @@ void loop() {
     change_measure_channel();
     start_ad_conversion();
     if (old_ADMUX == 0x40){
-        voltage_buff.push_value(sample);
+      voltage_buff.push_value(sample);
     }
     else if (old_ADMUX == 0x41){
-        current_buff.push_value(sample);
+      current_buff.push_value(sample);
     }
     else if (old_ADMUX == 0x42){
-        temperature = sample;
+      temperature = sample;
     }
-    else {
-        light = sample;
+    else if (old_ADMUX == 0x43) {
+      light = sample;
     }
-    // The the outter condition is called, num_of_measurements = 1
-    if (num_of_measurements == 0) {
-        Serial.print("V|");
-        voltage_buff.serial_transaction();
-        Serial.print("I|");
-        current_buff.serial_transaction();
-        Serial.print("T|");
-        Serial.println(temperature);
-        Serial.print("L|");
-        Serial.println(light);
+    if (buffer_ready) {
+      buffer_ready = false;
+      Serial.print("V|");
+      voltage_buff.serial_transaction();
+      Serial.print("I|");
+      current_buff.serial_transaction();
+      Serial.print("T|");
+      Serial.println(temperature);
+      Serial.print("L|");
+      Serial.println(light);
+      Serial.println(">");
     }
     SREG ^= 0x80;
   }
